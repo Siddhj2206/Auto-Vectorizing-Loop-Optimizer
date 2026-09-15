@@ -16,7 +16,9 @@ Given a counted loop written in a tiny text format, the tool:
    scalar remainder loop (emitted as `VLOAD` / `VADD` / `VSTORE`-style
    pseudo-operations); otherwise the loop is left in scalar form.
 
-No real SIMD instructions are generated or executed — the output is toy IR.
+No real SIMD instructions are generated or executed — the output is toy IR. The
+results are checked by an interpreter that runs the original and transformed
+loops on identical inputs and compares them.
 
 ## Quick start
 
@@ -60,6 +62,38 @@ end
 
 The example files in [`examples/`](examples) map one-to-one onto the test plan.
 
+## Architecture and data flow
+
+Three points can reject a loop and leave it in scalar form rather than
+proceeding to the transformer.
+
+```mermaid
+flowchart TD
+    A["Loop file (.loop)<br/>toy IR text"] --> B["1. Parser<br/>parser.py"]
+    B --> C{"2. Scope check<br/>scope.py"}
+    C -->|reject| R["Left in scalar form<br/>(unchanged loop)"]
+    C -->|pass| D{"3. Dependence analysis<br/>dependence.py"}
+    D -->|loop-carried dependence| R
+    D -->|independent| E{"4. Legality check<br/>legality.py"}
+    E -->|illegal| R
+    E -->|legal| F["5. Strip-mine transform<br/>transform.py"]
+    F --> G["Vector main loop +<br/>scalar remainder loop"]
+    G --> H["Executor + equivalence check<br/>executor.py"]
+    R --> H
+    H --> I["Report / CLI output<br/>report.py, cli.py"]
+```
+
+Interface / data-flow between stages:
+
+| Stage | Input | Output |
+|---|---|---|
+| Parser | IR text | `Loop` (or a parse error) |
+| Scope check | `Loop` | `ScopeResult` (ok / reasons) |
+| Dependence | `Loop` | `DependenceResult` (verdict, pairs, distances) |
+| Legality | `Loop` | `LegalityResult` (ok / reasons) |
+| Transform | `Loop` | `Transformed` (vector body, vector/remainder trip counts) |
+| Executor | `Loop` + `Transformed` | `VerificationResult` (equal / mismatches) |
+
 ## Pipeline and modules
 
 | Stage | Module | Responsibility |
@@ -86,41 +120,57 @@ are provably independent, otherwise the simplified test cannot prove
 independence and the pair is treated conservatively as possibly dependent.
 Read-read pairs are skipped and distinct arrays are assumed not to alias.
 
-## Test plan
+## Test plan and results
 
-| ID | Category | Input | Expected |
-|---|---|---|---|
-| T-01 | Positive | `c[i] = a[i] + b[i]` | VECTORIZED |
-| T-02 | Positive | `c[i] = a[i] - b[i]` | VECTORIZED |
-| T-03 | Positive | `c[i] = a[i] * b[i]` | VECTORIZED |
-| T-04 | Positive | `b[i] = a[i]` | VECTORIZED |
-| T-05 | Positive | `y[i] = alpha*x[i] + y[i]` | VECTORIZED |
-| T-06 | Negative | `a[i] = a[i-1] + 1` | REJECTED (loop-carried RAW, distance −1) |
-| T-07 | Negative | `a[i+1] = a[i] * 2` | REJECTED (cross-offset dependence) |
-| T-08 | Negative | body containing `foo(...)` | REJECTED (function call out of scope) |
-| T-09 | Boundary | trip count < vector width | remainder loop only |
-| T-10 | Boundary | trip count not divisible by width | vector loop + non-empty remainder |
-| T-11 | Boundary | trip count = 0 | no-op, no crash |
+| ID | Category | Input | Expected | Actual | Result |
+|---|---|---|---|---|---|
+| T-01 | Positive | `c[i] = a[i] + b[i]` | VECTORIZED | VECTORIZED | PASS |
+| T-02 | Positive | `c[i] = a[i] - b[i]` | VECTORIZED | VECTORIZED | PASS |
+| T-03 | Positive | `c[i] = a[i] * b[i]` | VECTORIZED | VECTORIZED | PASS |
+| T-04 | Positive | `b[i] = a[i]` | VECTORIZED | VECTORIZED | PASS |
+| T-05 | Positive | `y[i] = alpha*x[i] + y[i]` | VECTORIZED | VECTORIZED | PASS |
+| T-06 | Negative | `a[i] = a[i-1] + 1` | REJECTED | REJECTED — RAW, distance −1 | PASS |
+| T-07 | Negative | `a[i+1] = a[i] * 2` | REJECTED | REJECTED — RAW, distance −1 | PASS |
+| T-08 | Negative | body containing `foo(...)` | REJECTED | REJECTED — legality: function call | PASS |
+| T-09 | Boundary | trip count < vector width | remainder loop only | vector_trip = 0, remainder = 3 | PASS |
+| T-10 | Boundary | trip count not divisible by width | vector loop + remainder | vector_trip = 100, remainder = 1 | PASS |
+| T-11 | Boundary | trip count = 0 | no-op, no crash | no loops emitted | PASS |
 
-These are encoded as executable assertions in
-[`tests/test_taxonomy.py`](tests/test_taxonomy.py); unit tests for the parser,
-affine reduction, dependence distances and lowering live in
-[`tests/test_units.py`](tests/test_units.py).
+The taxonomy is encoded as executable assertions in
+[`tests/test_taxonomy.py`](tests/test_taxonomy.py). Supporting unit tests live in
+[`tests/test_ir_parser.py`](tests/test_ir_parser.py) (parser, affine reduction),
+[`tests/test_dependence.py`](tests/test_dependence.py) (distances, GCD),
+[`tests/test_transform.py`](tests/test_transform.py) (strip-mining partition) and
+[`tests/test_cli.py`](tests/test_cli.py) (CLI behaviour). **Total: 34 tests, all
+passing** (`uv run pytest`).
 
-**Correctness.** `executor.py` interprets both the original scalar loop and the
-emitted vector program (`VLOAD` reads `V` consecutive elements, `VBCAST`
-broadcasts a scalar, arithmetic runs element-wise, `VSTORE` writes `V`
-consecutive elements) over identical, deterministically generated arrays and
-compares the results. [`tests/test_executor.py`](tests/test_executor.py)
-asserts equality for every positive case, across vector widths 1–8 and for
-trip counts that are smaller than, equal to, and larger than the width — so
-strip-mining failures surface as failing tests, not silent wrong output.
+### Correctness
+
+`executor.py` interprets both the original scalar loop and the emitted vector
+program (`VLOAD` reads `V` consecutive elements, `VBCAST` broadcasts a scalar,
+arithmetic runs element-wise, `VSTORE` writes `V` consecutive elements) over
+identical, deterministically generated arrays and compares the results.
+[`tests/test_executor.py`](tests/test_executor.py) asserts equality for every
+positive case, across vector widths 1–8 and for trip counts smaller than, equal
+to, and larger than the width — so strip-mining failures surface as failing
+tests, not silent wrong output.
+
+## Defect log
+
+| ID | Symptom | Root cause | Correction | Status |
+|---|---|---|---|---|
+| D-01 | Every taxonomy test failed with `expected an identifier but found '['` | `_parse_factor` handled `id(` (calls) but not `id[` (array reads), so a right-hand-side reference was parsed as a scalar | Parse `id[ index ]` into a `Ref` in `parser.py` | Fixed |
+| D-02 | A loop such as `c[i] = a[i] + i` vectorized wrongly | The transformer treated any `Scalar` as loop-invariant and emitted `VBCAST i` for the induction variable | `legality.py` rejects the induction variable used as a scalar value | Fixed (prevented) |
+| D-03 | `c[2*i] = a[2*i]` would be lowered to a contiguous `VLOAD` and compute wrong values | The transformer assumes unit stride when it emits `VLOAD a[...]` | `legality.py` rejects any access with `coeff != 1` | Fixed (prevented) |
+| D-04 | A dependence may be reported where a full solver would prove independence | The offset test cannot solve the two-variable Diophantine when coefficients differ; it falls back to the GCD necessary condition | Accepted simplification, documented under *Scope and limitations* | Known limitation |
+| D-05 | README referenced `tests/test_units.py`, which no longer exists | The unit tests were split into per-module files | Corrected the references to the per-module test files | Fixed |
 
 ## Scope and limitations
 
 In scope: single-basic-block counted loops, one-dimensional arrays, affine
 **unit-stride** accesses, element-wise arithmetic, SAXPY-style operations,
-configurable vector width, scalar remainder loop.
+configurable vector width, scalar remainder loop, execution and equivalence
+checking of the emitted IR.
 
 Out of scope (as frozen at Review 1): general alias analysis, multi-dimensional
 arrays, reductions, function calls, exceptions, data-dependent control flow,
@@ -134,17 +184,70 @@ Known simplifications:
   dependence that a general solver would disprove);
 * `vector_width` is a scalar knob, not a target cost model.
 
-## Module ownership (responsibility assignment)
+## Review 2 coverage
 
-| Member | Owns | Files |
+Review 2 is an implementation review, and the agreed scope for it was roughly
+60% of the full (Review 3) deliverable — a **depth** cut, not a breadth cut:
+every pipeline stage is built at demonstrable depth, and the final-polish layer
+is deferred.
+
+| Deliverable | Review 2 | Review 3 |
 |---|---|---|
-| Member 2 (front-end) | IR model, parser, scope check | `ir.py`, `parser.py`, `scope.py` |
-| Member 3 (algorithm) | Dependence analysis, legality | `dependence.py`, `legality.py` |
-| Member 1 (integration) | Transformer, pipeline driver | `transform.py`, `pipeline.py` |
-| Member 4 (testing/interface) | Test suite, executor, CLI, README | `tests/`, `executor.py`, `cli.py`, `README.md` |
+| IR model, parser, scope check | ✅ | — |
+| Dependence analyzer | ✅ | — |
+| Legality checker | ✅ | — |
+| Strip-mining transformer | ✅ | — |
+| Interpreter + equivalence check | ✅ | — |
+| Test suite (34 tests) | ✅ | wider invalid/boundary set |
+| CLI + 11 examples | ✅ | — |
+| README / run instructions | ✅ | module docs, progress document |
+| Static op-count performance comparison | deferred | planned |
+| Visualisation / step trace | deferred | planned |
 
-Ownership is a responsibility assignment; contribution evidence is each
-member's own commits against their files.
+## Module ownership and responsibility matrix
+
+| Member | Assigned module | Branch | Evidence | Pending for Review 3 | Integration dependency |
+|---|---|---|---|---|---|
+| Member 1 — Kaviya Shree S | Transformer, pipeline driver (integration) | `feat/transform` | `transform.py`, `pipeline.py`, `test_transform.py` | end-to-end trace, demo rehearsal | depends on analysis verdicts from Member 3 |
+| Member 2 — Ayush Garg | IR model, parser, scope check (front-end) | `feat/frontend` | `ir.py`, `parser.py`, `scope.py`, `test_ir_parser.py` | wider parser/boundary tests | produces the `Loop` every later stage consumes |
+| Member 3 — Siddhant Jain | Dependence analysis, legality (algorithm) | `feat/analysis` | `dependence.py`, `legality.py`, `test_dependence.py` | extend dependence edge cases | consumes front-end `Loop`; feeds transform |
+| Member 4 — Gnana Sasidhar | Runtime, CLI, tests, docs (testing/interface) | `feat/verify` | `executor.py`, `report.py`, `cli.py`, `examples/`, `tests/` | op-count comparison, visualisation, progress doc | runs the integrated pipeline end to end |
+
+Ownership is a responsibility assignment. Contribution evidence is each
+member's own commits against their files, merged through that member's branch
+PR; the `testing` branch holds an integrated reference snapshot.
+
+## Review 1 closure
+
+| Review 1 observation / action item | Action taken | Evidence | Status |
+|---|---|---|---|
+| Section 11 — "initial progress / proof of start: NO EVIDENCE PROVIDED" | Built the prototype repository | 8 modules, 11 examples, 34 passing tests, four member branches + `testing` reference | Closed |
+| Requirements — "[TO BE COMPLETED]: confirm whether LLVM/opt integration is planned" | Confirmed out of scope | No LLVM/opt dependency; README *Scope and limitations* | Closed |
+| Design — "no implementation evidence attached" | Implemented the designed pipeline | `src/avlo/*.py` implements all five stages | Closed |
+| Work allocation — "core-design load on one member is too high" | Rebalanced ownership across all four members | Responsibility matrix above; one branch per member | Closed |
+| Presentation — "each member should rehearse their assigned slides" | Demo script below; per-member viva points | Live `avlo` run on four representative loops | In progress |
+
+## Review 3 completion plan
+
+| Pending task | Owner | Target | Notes |
+|---|---|---|---|
+| Member branches merged to `master` | All members | Day 1 | each member commits their own files via their PR |
+| Review 2 progress document + slides | Member 1 / Member 4 | Day 1 | assembled from this README |
+| Static op-count performance comparison | Member 4 | Week 1 | scalar vs vector operation counts per loop |
+| Visualisation / step trace | Member 4 | Week 2 | show dependence pairs and the strip-mine split |
+| Wider invalid / boundary test set | Member 2 / Member 4 | Week 2 | malformed input, extreme trip counts |
+| Module-level documentation | All members | Week 3 | docstrings + per-module notes |
+| Final demo + report | All members | Week 4 | end-to-end run on the full example set |
+
+## Demo script
+
+```bash
+uv run avlo examples/saxpy.loop         # vectorizable: VBCAST/VLOAD/VMUL/VADD/VSTORE
+uv run avlo --verify examples/saxpy.loop # equivalence: PASS
+uv run avlo examples/recurrence.loop     # loop-carried RAW dependence, distance -1
+uv run avlo examples/function_call.loop  # rejected by the legality checker
+uv run avlo examples/uneven_trip.loop    # vector main loop + scalar remainder
+```
 
 ## Requirements
 
