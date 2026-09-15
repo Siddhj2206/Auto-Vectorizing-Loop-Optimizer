@@ -1,0 +1,7 @@
+# T-05  SAXPY  y[i] = alpha * x[i] + y[i]  ->  VECTORIZABLE
+# y is read and written at the same offset within one iteration, so there is
+# no loop-carried dependence.
+vector_width 4
+loop i = 0 to 100
+    y[i] = alpha * x[i] + y[i]
+end

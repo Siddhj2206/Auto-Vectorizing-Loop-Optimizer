@@ -1,0 +1,5 @@
+# T-09  trip count smaller than the vector width  ->  remainder loop only
+vector_width 4
+loop i = 0 to 3
+    c[i] = a[i] + b[i]
+end

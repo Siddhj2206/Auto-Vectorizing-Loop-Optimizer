@@ -1,0 +1,6 @@
+# T-06  recurrence  a[i] = a[i-1] + 1  ->  NOT VECTORIZABLE
+# Loop-carried read-after-write dependence at distance -1.
+vector_width 4
+loop i = 1 to 101
+    a[i] = a[i-1] + 1
+end
