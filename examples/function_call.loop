@@ -1,0 +1,6 @@
+# T-08  function call in the body  ->  REJECTED (out of scope)
+# Independently of the dependence verdict, foo() is an unsupported construct.
+vector_width 4
+loop i = 0 to 100
+    c[i] = a[i] + foo(b[i])
+end

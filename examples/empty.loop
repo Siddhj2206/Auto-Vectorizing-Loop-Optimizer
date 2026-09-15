@@ -1,0 +1,5 @@
+# T-11  empty loop (trip count 0)  ->  no-op, the pipeline must not crash
+vector_width 4
+loop i = 0 to 0
+    c[i] = a[i] + b[i]
+end

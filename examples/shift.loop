@@ -1,0 +1,6 @@
+# T-07  cross-offset access  a[i+1] = a[i] * 2  ->  NOT VECTORIZABLE
+# The write touches a[i+1] while the read touches a[i]; iterations overlap.
+vector_width 4
+loop i = 0 to 100
+    a[i+1] = a[i] * 2
+end
