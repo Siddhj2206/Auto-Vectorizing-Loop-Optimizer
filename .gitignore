@@ -1,0 +1,8 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# uv
+# (uv.lock is intentionally committed for reproducible builds)
