@@ -1,0 +1,5 @@
+# T-10  trip count not divisible by the vector width  ->  vector loop + remainder
+vector_width 4
+loop i = 0 to 101
+    c[i] = a[i] + b[i]
+end

@@ -1,0 +1,5 @@
+# T-01  element-wise addition  ->  VECTORIZABLE
+vector_width 4
+loop i = 0 to 100
+    c[i] = a[i] + b[i]
+end
