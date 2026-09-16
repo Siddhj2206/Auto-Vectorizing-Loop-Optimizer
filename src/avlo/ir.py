@@ -298,7 +298,7 @@ class Transformed:
             step = self.vector_width
             out.append(
                 f"# vector main loop: {iv} = {start}, {start + step}, ... < {hi}"
-                f"  ({self.vector_trip // step} vector iteration(s) of width {step})"
+                f"  ({self.vector_trip // step} vector iteration(s), {step} elements each)"
             )
             out.append(f"{iv} = {start}")
             out.append(f"while {iv} < {hi}:")
