@@ -11,10 +11,29 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 #: Binary operators the toy IR understands.
-SUPPORTED_BINOPS = {"+", "-", "*", "/"}
+SUPPORTED_BINOPS = {"+", "-", "*", "/", "%"}
 
 #: Precedence used by :func:`render` so printed expressions stay readable.
-_PRECEDENCE = {"+": 1, "-": 1, "*": 2, "/": 2}
+_PRECEDENCE = {
+    "||": 1,
+    "&&": 2,
+    "|": 3,
+    "^": 4,
+    "&": 5,
+    "==": 6,
+    "!=": 6,
+    "<": 7,
+    "<=": 7,
+    ">": 7,
+    ">=": 7,
+    "<<": 8,
+    ">>": 8,
+    "+": 9,
+    "-": 9,
+    "*": 10,
+    "/": 10,
+    "%": 10,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +83,9 @@ class Expr:
 
 @dataclass(frozen=True)
 class Num(Expr):
-    """An integer literal."""
+    """An integer or floating-point literal."""
 
-    value: int
+    value: int | float
 
 
 @dataclass(frozen=True)
@@ -91,6 +110,9 @@ class Ref(Expr):
     array: str
     index: Optional[Index] = None
     raw_index: Optional[Expr] = None
+    symbolic_offset: Optional[str] = None
+    symbolic_names: frozenset[str] = frozenset()
+    index_names: frozenset[str] = frozenset()
 
     def reads(self) -> list["Ref"]:
         return [self]
@@ -148,6 +170,46 @@ class Call(Expr):
         return out
 
 
+@dataclass(frozen=True)
+class Cast(Expr):
+    """A source-language cast retained for analysis of real C expressions."""
+
+    type_name: str
+    value: Expr
+
+    def reads(self) -> list["Ref"]:
+        return self.value.reads()
+
+    def calls(self) -> list["Call"]:
+        return self.value.calls()
+
+    def binops(self) -> list[str]:
+        return self.value.binops()
+
+    def scalars(self) -> list["Scalar"]:
+        return self.value.scalars()
+
+
+@dataclass(frozen=True)
+class Unary(Expr):
+    """A side-effect-free unary operation from source C."""
+
+    op: str
+    value: Expr
+
+    def reads(self) -> list["Ref"]:
+        return self.value.reads()
+
+    def calls(self) -> list["Call"]:
+        return self.value.calls()
+
+    def binops(self) -> list[str]:
+        return self.value.binops()
+
+    def scalars(self) -> list["Scalar"]:
+        return self.value.scalars()
+
+
 def render(e: Expr, iv: str = "i", min_precedence: int = 0) -> str:
     """Render an expression back to readable toy-IR text."""
     if isinstance(e, Num):
@@ -157,6 +219,8 @@ def render(e: Expr, iv: str = "i", min_precedence: int = 0) -> str:
     if isinstance(e, Ref):
         if e.index is not None:
             idx = e.index.render(iv)
+            if e.symbolic_offset:
+                idx = f"{idx} + ({e.symbolic_offset})"
         elif e.raw_index is not None:
             idx = render(e.raw_index, iv)
         else:
@@ -164,6 +228,10 @@ def render(e: Expr, iv: str = "i", min_precedence: int = 0) -> str:
         return f"{e.array}[{idx}]"
     if isinstance(e, Call):
         return f"{e.name}({', '.join(render(a, iv) for a in e.args)})"
+    if isinstance(e, Cast):
+        return f"({e.type_name}){render(e.value, iv)}"
+    if isinstance(e, Unary):
+        return f"{e.op}{render(e.value, iv)}"
     if isinstance(e, BinOp):
         precedence = _PRECEDENCE[e.op]
         left = render(e.left, iv, precedence)
@@ -205,6 +273,10 @@ class Loop:
     statements: list[Statement] = field(default_factory=list)
     vector_width: int = 4
     source: str = "<memory>"
+    extra_reads: list[Ref] = field(default_factory=list)
+    reductions: list[tuple[str, str]] = field(default_factory=list)
+    source_level: bool = False
+    pure_calls: set[str] = field(default_factory=set)
 
     @property
     def end(self) -> int:

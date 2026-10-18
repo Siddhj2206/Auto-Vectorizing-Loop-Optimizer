@@ -32,7 +32,7 @@ _TOKEN_RE = re.compile(
     | (?P<comment>\#[^\n]*)
     | (?P<num>\d+)
     | (?P<id>[A-Za-z_]\w*)
-    | (?P<op>[-+*/()\[\],=])
+    | (?P<op>[-+*/%()\[\],=])
     """,
     re.VERBOSE,
 )
@@ -202,7 +202,7 @@ class Parser:
         node = self._parse_factor()
         while True:
             token = self._peek()
-            if token is not None and token.kind == "op" and token.value in ("*", "/"):
+            if token is not None and token.kind == "op" and token.value in ("*", "/", "%"):
                 self._next()
                 node = BinOp(str(token.value), node, self._parse_factor())
             else:

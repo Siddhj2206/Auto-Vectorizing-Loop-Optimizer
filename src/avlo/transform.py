@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from .ir import BinOp, Call, Loop, Num, Operand, Ref, Scalar, Transformed, VectorOp
 
-_VECTOR_OP = {"+": "VADD", "-": "VSUB", "*": "VMUL", "/": "VDIV"}
+_VECTOR_OP = {"+": "VADD", "-": "VSUB", "*": "VMUL", "/": "VDIV", "%": "VREM"}
 
 
 class _Temps:
@@ -29,6 +29,8 @@ class _Temps:
 
 
 def transform(loop: Loop) -> Transformed:
+    if loop.source_level:
+        raise ValueError("C source loops are emitted through --emit-c, not toy-IR lowering")
     width = loop.vector_width
     vector_trip = (loop.trip // width) * width
     remainder_trip = loop.trip - vector_trip

@@ -1,10 +1,12 @@
 [project]
 name = "avlo"
 version = "0.1.0"
-description = "Auto-Vectorizing Loop Optimizer: a scoped, inspectable IR-to-IR toy vectorizer"
+description = "Source-level C loop vectorizer with inspectable dependence analysis"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pycparser>=3.11",
+]
 
 [project.scripts]
 avlo = "avlo.cli:main"

@@ -32,7 +32,7 @@ class Access:
     array: str
     index: Index
     role: str
-    statement: Statement
+    statement: Statement | None
     rendered: str
 
 
@@ -66,6 +66,11 @@ def collect_accesses(loop: Loop) -> list[Access]:
                 accesses.append(
                     Access(ref.array, ref.index, READ, statement, render(ref, loop.iv))
                 )
+    for ref in loop.extra_reads:
+        if ref.index is not None:
+            accesses.append(
+                Access(ref.array, ref.index, READ, None, render(ref, loop.iv))
+            )
     return accesses
 
 
@@ -127,13 +132,6 @@ def _pair(first: Access, second: Access, trip: int) -> Optional[Dependence]:
 def analyze(loop: Loop) -> DependenceResult:
     accesses = collect_accesses(loop)
     result = DependenceResult(has_dependence=False)
-
-    # Offset-based comparison assumes distinct arrays do not alias.
-    arrays = {access.array for access in accesses}
-    if len(arrays) > 1:
-        result.notes.append(
-            "distinct arrays are assumed not to alias (stated project assumption)"
-        )
 
     for i in range(len(accesses)):
         for j in range(i + 1, len(accesses)):

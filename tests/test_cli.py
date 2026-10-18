@@ -32,5 +32,57 @@ def test_cli_missing_file(tmp_path, capsys):
 
 
 def test_every_example_runs():
-    for path in sorted(EXAMPLES.glob("*.loop")):
+    for path in sorted(EXAMPLES.glob("*.c")):
         assert main([str(path)]) == 0, path
+
+
+def test_perfect_loop_nest_vectorizes_innermost_loop(capsys):
+    path = EXAMPLES / "nested_loop.c"
+    assert main([str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "C loop at" in output
+    assert "VECTORIZED" in output
+    assert "Unsupported" not in output
+
+
+def test_nested_recurrence_is_rejected(capsys):
+    path = EXAMPLES / "nested_recurrence.c"
+    assert main([str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "loop-carried dependence" in output
+    assert "REJECTED" in output
+
+
+def test_emit_c_annotates_nested_control_flow(tmp_path):
+    output = tmp_path / "nested_branch.simd.c"
+    assert main([str(EXAMPLES / "nested_branch.c"), "--emit-c", str(output)]) == 0
+    source = output.read_text(encoding="utf-8")
+    assert source.count("#pragma omp simd") >= 1
+    assert "if (flag[i])" in source
+
+
+def test_emit_c_inserts_directives_at_each_same_line_loop(tmp_path):
+    output = tmp_path / "compact_loops.simd.c"
+    assert main([str(EXAMPLES / "compact_loops.c"), "--emit-c", str(output)]) == 0
+    source = output.read_text(encoding="utf-8")
+    assert source.count("#pragma omp simd") == 2
+    assert "#pragma omp simd\nfor (int i" in source
+    assert "#pragma omp simd\nfor (int j" in source
+
+
+def test_early_exit_is_not_annotated(tmp_path, capsys):
+    source = tmp_path / "early_exit.c"
+    emitted = tmp_path / "early_exit.simd.c"
+    source.write_text(
+        "void f(int n, int * restrict a) {\n"
+        "  for (int i = 0; i < n; ++i) {\n"
+        "    if (a[i] < 0) break;\n"
+        "    a[i] += 1;\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert main([str(source), "--emit-c", str(emitted)]) == 0
+    output = capsys.readouterr().out
+    assert "Unsupported" in output
+    assert "#pragma omp simd" not in emitted.read_text(encoding="utf-8")

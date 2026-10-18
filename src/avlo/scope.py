@@ -27,7 +27,7 @@ def check(loop: Loop) -> ScopeResult:
             f"trip count is negative ({loop.trip}); only counted loops with a "
             f"known non-negative trip count are in scope"
         )
-    if not loop.statements and loop.trip > 0:
+    if not loop.statements and not loop.reductions and loop.trip > 0:
         reasons.append("loop body is empty; expected at least one statement")
     for statement in loop.statements:
         if statement.target.array == loop.iv:
@@ -39,5 +39,8 @@ def check(loop: Loop) -> ScopeResult:
                 f"array index could not be reduced to an affine form for "
                 f"{statement.target.array}[...]"
             )
+    for ref in loop.extra_reads:
+        if ref.index is None:
+            reasons.append(f"reduction read {ref.array}[...] has a non-affine index")
 
     return ScopeResult(ok=not reasons, reasons=reasons)

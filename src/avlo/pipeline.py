@@ -61,6 +61,13 @@ def analyze(loop: Loop) -> Report:
             reason="legality: " + "; ".join(legality_result.reasons),
         )
 
+    if loop.source_level:
+        return Report(
+            loop, scope_result, dependence=dependence_result,
+            legality=legality_result, status=VECTORIZED,
+            reason="source loop is dependency-free and satisfies the supported C preconditions",
+        )
+
     transformed = transform.transform(loop)
     return Report(
         loop, scope_result, dependence=dependence_result,

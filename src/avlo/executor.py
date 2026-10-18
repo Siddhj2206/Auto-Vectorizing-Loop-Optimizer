@@ -92,6 +92,8 @@ def _eval(expr: Expr, arrays, scalars, i: int):
             return left * right
         if expr.op == "/":
             return left / right
+        if expr.op == "%":
+            return left - int(left / right) * right
         raise ExecutionError(f"unsupported operator {expr.op!r}")
     if isinstance(expr, Call):
         raise ExecutionError(f"cannot execute call {expr.name}()")
@@ -131,8 +133,9 @@ def _run_vector_body(transformed: Transformed, arrays, scalars, i: int) -> None:
         elif op.op == "VLOAD":
             operand = op.operands[0]
             base = operand.index.coeff * i + operand.index.offset
-            temps[op.dest] = [arrays[operand.name][base + k] for k in range(width)]
-        elif op.op in ("VADD", "VSUB", "VMUL", "VDIV"):
+            stride = operand.index.coeff
+            temps[op.dest] = [arrays[operand.name][base + stride * k] for k in range(width)]
+        elif op.op in ("VADD", "VSUB", "VMUL", "VDIV", "VREM"):
             left = _resolve(op.operands[0], temps, scalars, width)
             right = _resolve(op.operands[1], temps, scalars, width)
             if op.op == "VADD":
@@ -142,13 +145,17 @@ def _run_vector_body(transformed: Transformed, arrays, scalars, i: int) -> None:
             elif op.op == "VMUL":
                 temps[op.dest] = [a * b for a, b in zip(left, right)]
             else:
-                temps[op.dest] = [a / b for a, b in zip(left, right)]
+                if op.op == "VDIV":
+                    temps[op.dest] = [a / b for a, b in zip(left, right)]
+                else:
+                    temps[op.dest] = [a - int(a / b) * b for a, b in zip(left, right)]
         elif op.op == "VSTORE":
             mem, value = op.operands
             base = mem.index.coeff * i + mem.index.offset
+            stride = mem.index.coeff
             vector = _resolve(value, temps, scalars, width)
             for k in range(width):
-                arrays[mem.name][base + k] = vector[k]
+                arrays[mem.name][base + stride * k] = vector[k]
         else:
             raise ExecutionError(f"unknown vector op {op.op!r}")
 
@@ -187,6 +194,8 @@ class VerificationResult:
 
 def verify(loop: Loop, scalars: Optional[dict] = None) -> VerificationResult:
     """Run the scalar loop and its strip-mined form on identical inputs."""
+    if loop.source_level:
+        raise ExecutionError("the toy-IR interpreter does not execute C source loops")
     scalars = dict(scalars) if scalars is not None else default_scalars(loop)
     base = make_arrays(loop)
     transformed = transform(loop)

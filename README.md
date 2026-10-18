@@ -1,66 +1,62 @@
 # Auto-Vectorizing Loop Optimizer
 
-A small, self-contained **IR-to-IR auto-vectorizing loop optimizer** for
-Compiler Design (BCSE307). It demonstrates the core vectorization pipeline on
-a simplified *toy IR* instead of full LLVM IR, so that each stage can be read,
-run and tested on its own.
+A source-level auto-vectorizing loop optimizer for Compiler Design (BCSE307).
+AVLO analyzes real C source files, checks counted loops conservatively, and can
+emit C annotated with OpenMP SIMD directives. A compact internal loop IR is
+used by the analysis engine and its unit tests.
 
-Given a counted loop written in a tiny text format, the tool:
+For supported loops, the tool:
 
-1. parses it into a toy-IR loop object,
+1. parses C source into loop representations,
 2. checks it is inside the supported shape,
 3. decides whether its array accesses contain a **loop-carried dependence**
    using a simplified GCD / Banerjee-style offset comparison,
 4. checks a set of **legality preconditions**,
-5. if both checks pass, **strip-mines** the loop into a vector main loop plus a
-   scalar remainder loop (emitted as `VLOAD` / `VADD` / `VSTORE`-style
-   pseudo-operations); otherwise the loop is left in scalar form.
+5. annotates accepted C loops for SIMD compilation; unsupported or unsafe loops
+   remain unchanged.
 
-No real SIMD instructions are generated or executed — the output is toy IR. The
-results are checked by an interpreter that runs the original and transformed
-loops on identical inputs and compares them.
+`--emit-c` adds `#pragma omp simd` to accepted loops so a normal C compiler can
+generate SIMD code. AVLO does not claim a loop is vectorized when its supported
+subset or dependence checks do not justify the annotation.
 
 ## Quick start
 
 ```bash
-# install (uv manages the virtualenv and dev tools)
 uv sync
-
-# run the tool on an example loop
-uv run avlo examples/saxpy.loop
-
-# machine-readable output
-uv run avlo --json examples/recurrence.loop
-
-# execute the scalar and vectorized forms and check they agree
-uv run avlo --verify examples/saxpy.loop
-
-# run the test suite
+uv run avlo examples/vector_add.c
+uv run avlo examples/vector_add.c --emit-c /tmp/vector_add.simd.c
+gcc -O3 -fopenmp-simd /tmp/vector_add.simd.c -o /tmp/vector_add
+/tmp/vector_add
+uv run avlo --json examples/recurrence.c
 uv run pytest
 ```
 
-`uv run python -m avlo examples/copy.loop` works too.
+The current C subset accepts counted `for` loops with constant non-zero induction
+steps and runtime or constant bounds. Perfect counted-loop nests are analyzed at
+the innermost loop; outer induction variables can appear in affine subscripts.
+The parser supports one-dimensional accesses, fixed local multidimensional
+arrays, common signed and unsigned integer types, floating-point expressions,
+casts, and non-unit affine strides. Nested scalar `if/else` branches and `+` or
+`*` reductions are supported. Conditional compilation, compound pointer
+expressions, early loop exits, and general pointer alias analysis remain
+unsupported. Fixed local multidimensional arrays are supported for inner-loop
+vectorization when outer indexes match across accesses.
+Pointer-to-pointer row accesses are rejected. Multiple unqualified pointer
+bases are rejected when a cross-base access includes a write; same-base
+accesses are analyzed normally. `restrict` lets AVLO treat distinct restricted
+bases as disjoint according to the C contract; fixed local arrays are supported.
+A small set of pure math calls is
+accepted, including scalar user functions with a single side-effect-free return
+expression; AVLO adds `declare simd` for those helpers. Other calls are rejected.
+Unsupported constructs are reported and left unchanged.
+The parser uses `pycparser`, not a compiler plugin. With `--emit-c`, AVLO adds
+`#pragma omp simd` to loops it proves safe. Compile the output with OpenMP SIMD
+support enabled in a regular C compiler; the compiler still selects actual
+machine instructions.
 
-## The toy IR text format
-
-```text
-# comments start with '#'
-vector_width 4                # optional; defaults to 4
-
-loop i = 0 to 100             # iterations are start .. end-1 (trip count = 100)
-    y[i] = alpha * x[i] + y[i]
-end
-```
-
-* Array indices are **affine** in the induction variable: `i`, `i-1`, `i+1`,
-  `2*i+1`.
-* Statements are assignments to array elements. The right-hand side may use
-  `+ - * /`, array reads, integer literals and loop-invariant scalars.
-* A function call in the body (`foo(b[i])`) is representable but is rejected by
-  the legality checker as out of scope.
-* One loop per file, single basic block, one induction variable.
-
-The example files in [`examples/`](examples) map one-to-one onto the test plan.
+All project examples are C programs under [`examples/`](examples). They cover
+vector arithmetic, copies, reductions, branches, boundary trip counts, strided
+and affine accesses, helper calls, and cases that must be rejected.
 
 ## Architecture and data flow
 
@@ -69,30 +65,27 @@ proceeding to the transformer.
 
 ```mermaid
 flowchart TD
-    A["Loop file (.loop)<br/>toy IR text"] --> B["1. Parser<br/>parser.py"]
+    A["C source"] --> B["1. C front end<br/>c_frontend.py"]
     B --> C{"2. Scope check<br/>scope.py"}
     C -->|reject| R["Left in scalar form<br/>(unchanged loop)"]
     C -->|pass| D{"3. Dependence analysis<br/>dependence.py"}
     D -->|loop-carried dependence| R
     D -->|independent| E{"4. Legality check<br/>legality.py"}
     E -->|illegal| R
-    E -->|legal| F["5. Strip-mine transform<br/>transform.py"]
-    F --> G["Vector main loop +<br/>scalar remainder loop"]
-    G --> H["Executor + equivalence check<br/>executor.py"]
-    R --> H
-    H --> I["Report / CLI output<br/>report.py, cli.py"]
+    E -->|legal| F["Emit #pragma omp simd<br/>on accepted source loops"]
+    F --> I["CLI analysis / emitted C"]
+    R --> I
 ```
 
 Interface / data-flow between stages:
 
 | Stage | Input | Output |
 |---|---|---|
-| Parser | IR text | `Loop` (or a parse error) |
+| C front end | C source | supported loop records (or source diagnostics) |
 | Scope check | `Loop` | `ScopeResult` (ok / reasons) |
 | Dependence | `Loop` | `DependenceResult` (verdict, pairs, distances) |
 | Legality | `Loop` | `LegalityResult` (ok / reasons) |
-| Transform | `Loop` | `Transformed` (vector body, vector/remainder trip counts) |
-| Executor | `Loop` + `Transformed` | `VerificationResult` (equal / mismatches) |
+| C emitter | Original C + accepted loop locations | C source with OpenMP SIMD directives |
 
 ## Pipeline and modules
 
@@ -102,12 +95,12 @@ Interface / data-flow between stages:
 | 2. Parse | `src/avlo/parser.py` | Text IR → `Loop`; affine index reduction |
 | 3. Scope check | `src/avlo/scope.py` | Single-basic-block counted loop, known non-negative trip count |
 | 4. Dependence | `src/avlo/dependence.py` | GCD / Banerjee-style offset comparison, RAW/WAR/WAW, distances |
-| 5. Legality | `src/avlo/legality.py` | Affine + unit-stride accesses, supported ops, no unsupported constructs |
+| 5. Legality | `src/avlo/legality.py` | Affine non-broadcast accesses, supported ops, no unsupported constructs |
 | 6. Transform | `src/avlo/transform.py` | Strip-mining, vector body lowering, remainder loop |
 | Driver | `src/avlo/pipeline.py` | Wires the stages together and produces a `Report` |
 | Execute / verify | `src/avlo/executor.py` | Runs the scalar loop and the vectorized output on identical inputs and compares |
 | Output | `src/avlo/report.py` | Text and JSON rendering |
-| CLI | `src/avlo/cli.py` | `avlo <file.loop>` |
+| CLI | `src/avlo/cli.py` | `avlo <file.c>` |
 
 ### Dependence test in one paragraph
 
@@ -118,9 +111,11 @@ exact dependence distance `d = (c0' - c0) / c1`; the pair is loop-carried when
 necessary condition: when `gcd(c1, c1')` does not divide `c0' - c0` the accesses
 are provably independent, otherwise the simplified test cannot prove
 independence and the pair is treated conservatively as possibly dependent.
-Read-read pairs are skipped and distinct arrays are assumed not to alias.
+Read-read pairs are skipped. In toy IR, distinct array names are assumed not to
+alias. For C, the front end applies the pointer and `restrict` rules described
+above before passing accesses into the dependence analyzer.
 
-## Test plan and results
+## Internal analysis tests
 
 | ID | Category | Input | Expected | Actual | Result |
 |---|---|---|---|---|---|
@@ -136,13 +131,14 @@ Read-read pairs are skipped and distinct arrays are assumed not to alias.
 | T-10 | Boundary | trip count not divisible by width | vector loop + remainder | vector_trip = 100, remainder = 1 | PASS |
 | T-11 | Boundary | trip count = 0 | no-op, no crash | no loops emitted | PASS |
 
-The taxonomy is encoded as executable assertions in
+The analysis-engine taxonomy is encoded in
 [`tests/test_taxonomy.py`](tests/test_taxonomy.py). Supporting unit tests live in
 [`tests/test_ir_parser.py`](tests/test_ir_parser.py) (parser, affine reduction),
 [`tests/test_dependence.py`](tests/test_dependence.py) (distances, GCD),
 [`tests/test_transform.py`](tests/test_transform.py) (strip-mining partition) and
-[`tests/test_cli.py`](tests/test_cli.py) (CLI behaviour). **Total: 34 tests, all
-passing** (`uv run pytest`).
+[`tests/test_cli.py`](tests/test_cli.py) (C CLI and loop-nest behavior). Run
+`uv run pytest` for the unit suite and `uv run python scripts/e2e_c_examples.py`
+to compile and compare every C example.
 
 ### Correctness
 
@@ -161,98 +157,42 @@ tests, not silent wrong output.
 |---|---|---|---|---|
 | D-01 | Every taxonomy test failed with `expected an identifier but found '['` | `_parse_factor` handled `id(` (calls) but not `id[` (array reads), so a right-hand-side reference was parsed as a scalar | Parse `id[ index ]` into a `Ref` in `parser.py` | Fixed |
 | D-02 | A loop such as `c[i] = a[i] + i` vectorized wrongly | The transformer treated any `Scalar` as loop-invariant and emitted `VBCAST i` for the induction variable | `legality.py` rejects the induction variable used as a scalar value | Fixed (prevented) |
-| D-03 | `c[2*i] = a[2*i]` would be lowered to a contiguous `VLOAD` and compute wrong values | The transformer assumes unit stride when it emits `VLOAD a[...]` | `legality.py` rejects any access with `coeff != 1` | Fixed (prevented) |
+| D-03 | `c[2*i] = a[2*i]` would be lowered to contiguous `VLOAD` and compute wrong values | The vector executor originally assumed unit stride | Lane addresses now use the affine coefficient; constant-index broadcasts remain rejected | Fixed |
 | D-04 | A dependence may be reported where a full solver would prove independence | The offset test cannot solve the two-variable Diophantine when coefficients differ; it falls back to the GCD necessary condition | Accepted simplification, documented under *Scope and limitations* | Known limitation |
 | D-05 | README referenced `tests/test_units.py`, which no longer exists | The unit tests were split into per-module files | Corrected the references to the per-module test files | Fixed |
 
 ## Scope and limitations
 
-In scope: single-basic-block counted loops, one-dimensional arrays, affine
-**unit-stride** accesses, element-wise arithmetic, SAXPY-style operations,
-configurable vector width, scalar remainder loop, execution and equivalence
-checking of the emitted IR.
+Toy IR scope: counted loops, one-dimensional arrays, non-zero affine strides,
+element-wise arithmetic, configurable vector width, scalar remainder loop,
+execution and equivalence checking of the emitted IR.
 
-Out of scope (as frozen at Review 1): general alias analysis, multi-dimensional
-arrays, reductions, function calls, exceptions, data-dependent control flow,
-real SIMD code generation and hardware execution.
+C scope: the bounded subset described above, parsed with pycparser and emitted
+as source with OpenMP SIMD directives.
+
+Still out of scope: multidimensional pointer rows, arbitrary pointer alias
+versioning, side-effecting calls, conditional compilation, and direct SIMD
+instruction generation by AVLO.
 
 Known simplifications:
 
-* only unit-stride accesses are vectorized; a strided access such as `a[2*i]`
-  is reported and rejected rather than lowered;
 * when coefficients differ the dependence test is conservative (it may report a
   dependence that a general solver would disprove);
 * `vector_width` is a scalar knob, not a target cost model.
 
-## Review 2 coverage
+## C examples
 
-Review 2 is an implementation review, and the agreed scope for it was roughly
-60% of the full (Review 3) deliverable — a **depth** cut, not a breadth cut:
-every pipeline stage is built at demonstrable depth, and the final-polish layer
-is deferred.
-
-| Deliverable | Review 2 | Review 3 |
-|---|---|---|
-| IR model, parser, scope check | ✅ | — |
-| Dependence analyzer | ✅ | — |
-| Legality checker | ✅ | — |
-| Strip-mining transformer | ✅ | — |
-| Interpreter + equivalence check | ✅ | — |
-| Test suite (34 tests) | ✅ | wider invalid/boundary set |
-| CLI + 11 examples | ✅ | — |
-| README / run instructions | ✅ | module docs, progress document |
-| Static op-count performance comparison | deferred | planned |
-| Visualisation / step trace | deferred | planned |
-
-## Module ownership and responsibility matrix
-
-| Member | Assigned module | Branch | Evidence | Pending for Review 3 | Integration dependency |
-|---|---|---|---|---|---|
-| Member 1 — Kaviya Shree S | Transformer, pipeline driver (integration) | `feat/transform` | `transform.py`, `pipeline.py`, `test_transform.py` | end-to-end trace, demo rehearsal | depends on analysis verdicts from Member 3 |
-| Member 2 — Ayush Garg | IR model, parser, scope check (front-end) | `feat/frontend` | `ir.py`, `parser.py`, `scope.py`, `test_ir_parser.py` | wider parser/boundary tests | produces the `Loop` every later stage consumes |
-| Member 3 — Siddhant Jain | Dependence analysis, legality (algorithm) | `feat/analysis` | `dependence.py`, `legality.py`, `test_dependence.py` | extend dependence edge cases | consumes front-end `Loop`; feeds transform |
-| Member 4 — Gnana Sasidhar | Runtime, CLI, tests, docs (testing/interface) | `feat/verify` | `executor.py`, `report.py`, `cli.py`, `examples/`, `tests/` | op-count comparison, visualisation, progress doc | runs the integrated pipeline end to end |
-
-Ownership is a responsibility assignment. Contribution evidence is each
-member's own commits against their files, merged through that member's branch
-PR; the `testing` branch holds an integrated reference snapshot.
-
-## Review 1 closure
-
-| Review 1 observation / action item | Action taken | Evidence | Status |
-|---|---|---|---|
-| Section 11 — "initial progress / proof of start: NO EVIDENCE PROVIDED" | Built the prototype repository | 8 modules, 11 examples, 34 passing tests, four member branches + `testing` reference | Closed |
-| Requirements — "[TO BE COMPLETED]: confirm whether LLVM/opt integration is planned" | Confirmed out of scope | No LLVM/opt dependency; README *Scope and limitations* | Closed |
-| Design — "no implementation evidence attached" | Implemented the designed pipeline | `src/avlo/*.py` implements all five stages | Closed |
-| Work allocation — "core-design load on one member is too high" | Rebalanced ownership across all four members | Responsibility matrix above; one branch per member | Closed |
-| Presentation — "each member should rehearse their assigned slides" | Demo script below; per-member viva points | Live `avlo` run on four representative loops | In progress |
-
-## Review 3 completion plan
-
-| Pending task | Owner | Target | Notes |
-|---|---|---|---|
-| Member branches merged to `master` | All members | Day 1 | each member commits their own files via their PR |
-| Review 2 progress document + slides | Member 1 / Member 4 | Day 1 | assembled from this README |
-| Static op-count performance comparison | Member 4 | Week 1 | scalar vs vector operation counts per loop |
-| Visualisation / step trace | Member 4 | Week 2 | show dependence pairs and the strip-mine split |
-| Wider invalid / boundary test set | Member 2 / Member 4 | Week 2 | malformed input, extreme trip counts |
-| Module-level documentation | All members | Week 3 | docstrings + per-module notes |
-| Final demo + report | All members | Week 4 | end-to-end run on the full example set |
-
-## Demo script
+Every runnable program can be analyzed and emitted with `--emit-c`. For example:
 
 ```bash
-uv run avlo examples/saxpy.loop         # vectorizable: VBCAST/VLOAD/VMUL/VADD/VSTORE
-uv run avlo --verify examples/saxpy.loop # equivalence: PASS
-uv run avlo examples/recurrence.loop     # loop-carried RAW dependence, distance -1
-uv run avlo examples/function_call.loop  # rejected by the legality checker
-uv run avlo examples/uneven_trip.loop    # vector main loop + scalar remainder
+uv run avlo examples/saxpy.c
+uv run avlo examples/recurrence.c
+uv run avlo examples/branch.c --emit-c /tmp/branch.simd.c
+uv run avlo examples/reduction.c --emit-c /tmp/reduction.simd.c
+uv run avlo examples/step_strides.c --emit-c /tmp/steps.simd.c
+uv run python scripts/e2e_c_examples.py
 ```
 
-## Requirements
-
-* Python ≥ 3.11 (developed on 3.14)
-* [`uv`](https://docs.astral.sh/uv/) for environment management
-* `pytest` (dev dependency, installed by `uv sync`)
-
-No third-party runtime dependencies.
+The end-to-end script compiles every example and compares the original program's
+output with the emitted C. It requires GCC with OpenMP SIMD support. Low-level IR
+unit tests remain for the dependence and transformation engine.
