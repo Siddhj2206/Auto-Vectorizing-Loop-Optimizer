@@ -31,25 +31,27 @@ def test_cli_missing_file(tmp_path, capsys):
     assert "file not found" in capsys.readouterr().err
 
 
-def test_every_example_runs():
+def test_every_example_runs(capsys):
     for path in sorted(EXAMPLES.glob("*.c")):
         assert main([str(path)]) == 0, path
+    output = capsys.readouterr().out
+    assert "Transformed C source" in output
+    assert "for (; i" in output
 
 
 def test_perfect_loop_nest_vectorizes_innermost_loop(capsys):
     path = EXAMPLES / "nested_loop.c"
     assert main([str(path)]) == 0
     output = capsys.readouterr().out
-    assert "C loop at" in output
     assert "VECTORIZED" in output
-    assert "Unsupported" not in output
+    assert "UNSUPPORTED" not in output
 
 
 def test_nested_recurrence_is_rejected(capsys):
     path = EXAMPLES / "nested_recurrence.c"
     assert main([str(path)]) == 0
     output = capsys.readouterr().out
-    assert "loop-carried dependence" in output
+    assert "dependence RAW" in output
     assert "REJECTED" in output
 
 
@@ -84,5 +86,5 @@ def test_early_exit_is_not_annotated(tmp_path, capsys):
     )
     assert main([str(source), "--emit-c", str(emitted)]) == 0
     output = capsys.readouterr().out
-    assert "Unsupported" in output
+    assert "UNSUPPORTED" in output
     assert "#pragma omp simd" not in emitted.read_text(encoding="utf-8")

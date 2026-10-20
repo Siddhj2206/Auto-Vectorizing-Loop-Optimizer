@@ -80,8 +80,9 @@ uv run python scripts/e2e_c_examples.py
 Suggested live sequence:
 
 1. Show the repository revision, dependencies, and commands above.
-2. Analyze and emit a representative valid C loop; explain the reported decision
-   and where the directive appears in generated C.
+2. Analyze and emit a representative valid C loop; explain the reported decision,
+   the printed strip-mined representation, and where the directive appears
+   in generated C.
 3. Demonstrate a nested or boundary case and a reduction or supported branch.
 4. Analyze an unsafe dependence or unsupported pointer/control-flow case and
    show why it remains unannotated.

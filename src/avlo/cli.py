@@ -12,6 +12,7 @@ from .metrics import format_trace, operation_counts
 from .parser import ParseError, parse_file
 from .pipeline import analyze
 from .report import format_report, to_dict
+from .c_transform import transformed_source
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,28 +92,23 @@ def main(argv: list[str] | None = None) -> int:
         if counts is None:
             print("\nOperation counts: unavailable (loop was not vectorized)")
         else:
-            print("\nModeled operation counts (not measured performance):")
-            print(f"  scalar arithmetic operations: {counts['scalar_arithmetic']}")
+            print("\nModeled operations (not timings):")
             print(
-                "  vector arithmetic lane operations: "
-                f"{counts['vector_arithmetic_lanes']}"
+                f"  arithmetic: {counts['scalar_arithmetic']} scalar -> "
+                f"{counts['vector_arithmetic_instructions']} instructions "
+                f"({counts['vector_arithmetic_lanes']} lanes)"
             )
             print(
-                "  vector arithmetic pseudo-instructions: "
-                f"{counts['vector_arithmetic_instructions']}"
+                f"  loads: {counts['scalar_loads']} -> "
+                f"{counts['vector_load_instructions']} instructions"
             )
             print(
-                f"  loads: {counts['scalar_loads']} scalar element reads vs "
-                f"{counts['vector_load_instructions']} vector/scalar load instructions"
+                f"  stores: {counts['scalar_stores']} -> "
+                f"{counts['vector_store_instructions']} instructions"
             )
             print(
-                f"  stores: {counts['scalar_stores']} scalar element writes vs "
-                f"{counts['vector_store_instructions']} vector/scalar store instructions"
-            )
-            print(
-                f"  chunks: {counts['vector_iterations']} at width "
-                f"{counts['vector_width']}; scalar tail: "
-                f"{counts['scalar_remainder_iterations']} iteration(s)"
+                f"  chunks: {counts['vector_iterations']} x {counts['vector_width']}, "
+                f"tail {counts['scalar_remainder_iterations']}"
             )
 
     if args.verify:
@@ -170,81 +166,99 @@ def _main_c(args) -> int:
         })
         analyzed_reports.append(report)
 
+    annotated_source = _annotated_source(args.loop_file, candidates, entries)
     if args.emit_c:
-        source_text = args.loop_file.read_text(encoding="utf-8")
-        insertions: list[tuple[int, str]] = []
-        for candidate, entry in zip(candidates, entries):
-            if entry.get("status") != "VECTORIZED":
-                continue
-            reductions = candidate.reductions or []
-            clauses = " ".join(f"reduction({op}:{name})" for name, op in reductions)
-            suffix = f" {clauses}" if clauses else ""
-            insertions.append((
-                _source_offset(source_text, candidate.line, candidate.column),
-                f"#pragma omp simd{suffix}",
-            ))
-            for _, function_line, function_column in candidate.declare_simd or []:
-                insertions.append((
-                    _source_offset(source_text, function_line, function_column),
-                    "#pragma omp declare simd",
-                ))
-        for offset, insertion in sorted(insertions, key=lambda item: item[0], reverse=True):
-            source_text = _insert_directive(source_text, offset, insertion)
-        args.emit_c.write_text(source_text, encoding="utf-8")
+        args.emit_c.write_text(annotated_source, encoding="utf-8")
 
     if args.json:
         print(json.dumps({"source": str(args.loop_file), "loops": entries}, indent=2))
         if args.emit_c:
-            print(f"Wrote annotated C source: {args.emit_c}")
+            print(f"Wrote {args.emit_c}")
         return 0
 
     for candidate, entry, report in zip(candidates, entries, analyzed_reports):
-        print(f"C loop at {args.loop_file}:{entry['line']}")
+        location = f"{args.loop_file}:{entry['line']}"
         if entry.get("status") == "UNSUPPORTED":
-            print(f"  Unsupported: {entry['reason']}\n")
+            print(f"{location}  UNSUPPORTED ({entry['reason']})")
             continue
-        print(f"  Scope: {'PASS' if report.scope.ok else 'REJECT'}")
+        stage = (
+            "scope PASS" if report.scope.ok
+            else "scope REJECT (" + "; ".join(report.scope.reasons) + ")"
+        )
         if report.dependence is None:
-            print("  Dependence: not reached")
-        elif report.dependence.has_dependence:
-            print("  Dependence: found")
-            for dep in report.dependence.deps:
-                print(f"    {dep.kind}: {dep.detail}")
+            dependence = "dependence not reached"
+        elif report.dependence.deps:
+            dependence = "dependence " + "; ".join(
+                _dependence_text(dep) for dep in report.dependence.deps
+            )
         else:
-            print("  Dependence: none found")
+            dependence = "dependence none"
         if report.legality is None:
-            print("  Legality: not reached")
+            legality = "legality not reached"
+        elif report.legality.ok:
+            legality = "legality PASS"
         else:
-            print(f"  Legality: {'PASS' if report.legality.ok else 'REJECT'}")
-            for reason in report.legality.reasons:
-                print(f"    {reason}")
-        print(f"  Result: {report.status} — {report.reason}")
-        if candidate.dynamic_trip:
-            print("  Bound: runtime scalar (dependence test uses a conservative trip estimate)")
+            legality = "legality REJECT (" + "; ".join(report.legality.reasons) + ")"
+        bound = " | runtime bound" if candidate.dynamic_trip else ""
+        status = "VECTORIZED" if report.vectorized else "REJECTED"
+        print(f"{location}  {status}  {stage} | {dependence} | {legality}{bound}")
         if args.trace:
-            print("\nTrace: C source loop passed through scope, dependence and legality checks")
-            if candidate.dynamic_trip:
-                print("  runtime bound retained; dependence analysis used a conservative trip estimate")
-            if report.vectorized:
-                print("  loop source is preserved; --emit-c adds the SIMD directive")
+            stopped = "scope" if not report.scope.ok else (
+                "dependence" if report.dependence is not None and report.dependence.has_dependence
+                else "legality" if report.legality is not None and not report.legality.ok
+                else None
+            )
+            if stopped is None:
+                print("  trace: passed all stages; directive added to source")
             else:
-                print("  source loop remains unchanged")
-        if args.metrics:
-            counts = None if candidate.dynamic_trip or candidate.reductions else operation_counts(report)
-            if counts is None:
-                print("\nOperation counts: unavailable for source-level C analysis")
-            else:
-                print("\nModeled operation counts (not measured performance):")
-                print(f"  scalar arithmetic operations: {counts['scalar_arithmetic']}")
-                print(f"  vector arithmetic lane operations: {counts['vector_arithmetic_lanes']}")
-                print(f"  vector arithmetic pseudo-instructions: {counts['vector_arithmetic_instructions']}")
-                print(f"  vector chunks: {counts['vector_iterations']}; scalar tail: {counts['scalar_remainder_iterations']}")
-        if args.verify:
-            print("\nC equivalence check: not available; --verify executes only the toy-IR model")
-        print()
+                print(f"  trace: stopped at {stopped}")
+    if args.metrics:
+        print("metrics: not available for C input")
+    if args.verify:
+        print("verify: toy IR only")
+    display_source = transformed_source(
+        args.loop_file.read_text(encoding="utf-8"), candidates, entries
+    )
+    print("\nTransformed C source (accepted loops strip-mined; rejected loops unchanged):")
+    print(display_source)
     if args.emit_c:
-        print(f"Wrote annotated C source: {args.emit_c}")
+        print(f"\nWrote {args.emit_c}")
     return 0
+
+
+def _dependence_text(dep) -> str:
+    distance = "" if dep.distance is None else f", distance {dep.distance}"
+    return (
+        f"{dep.kind}: {dep.first.rendered} ({dep.first.role}) / "
+        f"{dep.second.rendered} ({dep.second.role}){distance}"
+    )
+
+
+def _annotated_source(path: Path, candidates, entries) -> str:
+    """Return the original C source with directives on accepted loops only."""
+    source_text = path.read_text(encoding="utf-8")
+    insertions: list[tuple[int, str]] = []
+    for candidate, entry in zip(candidates, entries):
+        if entry.get("status") != "VECTORIZED":
+            continue
+        reductions = candidate.reductions or []
+        clauses = " ".join(f"reduction({op}:{name})" for name, op in reductions)
+        suffix = f" {clauses}" if clauses else ""
+        insertions.append((
+            _source_offset(source_text, candidate.line, candidate.column),
+            f"#pragma omp simd{suffix}",
+        ))
+        for _, function_line, function_column in candidate.declare_simd or []:
+            insertions.append((
+                _source_offset(source_text, function_line, function_column),
+                "#pragma omp declare simd",
+            ))
+    # A helper used by several accepted loops would otherwise be annotated
+    # once per loop.
+    insertions = list(dict.fromkeys(insertions))
+    for offset, insertion in sorted(insertions, key=lambda item: item[0], reverse=True):
+        source_text = _insert_directive(source_text, offset, insertion)
+    return source_text
 
 
 def _source_offset(source: str, line: int, column: int) -> int:

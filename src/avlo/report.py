@@ -40,7 +40,6 @@ def format_report(report: Report) -> str:
 
     lines.append("")
     lines.append(f"Verdict: {report.status}")
-    lines.append(f"  {report.reason}")
 
     if report.transformed is not None:
         lines.append("")
