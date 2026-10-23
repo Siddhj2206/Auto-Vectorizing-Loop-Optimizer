@@ -1,3 +1,4 @@
+#pragma avlo width(4)
 #include <stdio.h>
 
 int main(void) {

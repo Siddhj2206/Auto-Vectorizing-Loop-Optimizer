@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -57,11 +58,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="OUTPUT.c",
         help="for C input, write source with #pragma omp simd on proven-safe loops",
     )
+    parser.add_argument(
+        "--width",
+        type=int,
+        metavar="N",
+        help="lane count for the printed strip-mined code (overrides #pragma avlo width)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.width is not None and args.width < 1:
+        print("error: --width must be at least 1", file=sys.stderr)
+        return 2
 
     if args.loop_file.suffix.lower() == ".c":
         return _main_c(args)
@@ -78,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"parse error in {args.loop_file}: {exc}", file=sys.stderr)
         return 2
 
+    if args.width is not None:
+        loop.vector_width = args.width
     report = analyze(loop)
     if args.json:
         print(json.dumps(to_dict(report), indent=2))
@@ -126,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _main_c(args) -> int:
     try:
+        source_text = args.loop_file.read_text(encoding="utf-8")
         candidates = parse_c_file(args.loop_file)
     except FileNotFoundError:
         print(f"error: file not found: {args.loop_file}", file=sys.stderr)
@@ -137,6 +150,8 @@ def _main_c(args) -> int:
     if not candidates:
         print(f"No for-loops found in {args.loop_file}")
         return 0
+
+    display_width = args.width if args.width is not None else _declared_width(source_text) or 4
 
     entries = []
     analyzed_reports = []
@@ -217,7 +232,7 @@ def _main_c(args) -> int:
     if args.verify:
         print("verify: toy IR only")
     display_source = transformed_source(
-        args.loop_file.read_text(encoding="utf-8"), candidates, entries
+        source_text, candidates, entries, width=display_width
     )
     print("\nTransformed C source (accepted loops strip-mined; rejected loops unchanged):")
     print(display_source)
@@ -259,6 +274,19 @@ def _annotated_source(path: Path, candidates, entries) -> str:
     for offset, insertion in sorted(insertions, key=lambda item: item[0], reverse=True):
         source_text = _insert_directive(source_text, offset, insertion)
     return source_text
+
+
+def _declared_width(source: str) -> int | None:
+    """Read ``#pragma avlo width(N)`` from the original C source."""
+    match = re.search(
+        r"^\s*#\s*pragma\s+avlo\s+width\s*\(\s*(\d+)\s*\)",
+        source,
+        re.MULTILINE,
+    )
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value if value >= 1 else None
 
 
 def _source_offset(source: str, line: int, column: int) -> int:

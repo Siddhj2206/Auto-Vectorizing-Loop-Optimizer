@@ -279,6 +279,11 @@ def transformed_source(
     text: str, candidates: list[CLoop], entries: list[dict], width: int = 4
 ) -> str:
     """Rewrite accepted loops in the source for display; leave rejections as-is."""
+    text = re.sub(
+        r"(?m)^(\s*#\s*pragma\s+avlo\s+width\s*\()\d+(\))",
+        rf"\g<1>{width}\g<2>",
+        text,
+    )
     edits: list[tuple[int, int, str]] = []
     for candidate, entry in zip(candidates, entries):
         if entry.get("status") != "VECTORIZED":

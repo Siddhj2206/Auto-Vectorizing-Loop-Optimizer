@@ -10,11 +10,11 @@
 
 AVLO analyzes supported counted loops in C, checks their memory dependences and
 legality, and reports the full source with accepted loops strip-mined: a main
-loop holding four copies of the body plus a scalar remainder loop, with rejected
-loops printed unchanged. `--emit-c` writes the original C with OpenMP SIMD
-directives on accepted loops. The printed strip-mined form is a reference view;
-the emitted C is the compiled artifact, and a regular C compiler performs
-machine-code generation. The repository also retains a small internal loop IR
+loop holding V copies of the body (four by default) plus a scalar remainder
+loop, with rejected loops printed unchanged. `--emit-c` writes the original C
+with OpenMP SIMD directives on accepted loops. The printed strip-mined form is a
+reference view; the emitted C is the compiled artifact, and a regular C compiler
+performs machine-code generation. The repository also retains a small internal loop IR
 for analysis and transformation tests; `.loop` files are no longer the project
 examples or the primary user input.
 
@@ -25,9 +25,9 @@ examples or the primary user input.
 | Analyze real C programs and report loop decisions | `avlo <file.c>` and JSON output; C examples in `examples/` | Implemented for the documented subset |
 | Reject unsafe or unsupported loop forms with a reason | Scope, dependence, legality, alias, control-flow and unsupported-form checks | Implemented conservatively within the documented subset |
 | Emit compilable C with SIMD annotations for accepted loops | `avlo <file.c> --emit-c output.c`; OpenMP SIMD pragmas | Implemented |
-| Show the strip-mined form of accepted loops | `avlo <file.c>` prints the full source with a four-iteration main loop and a scalar remainder | Implemented as a display-only representation; `--emit-c` remains the compiled artifact |
+| Show the strip-mined form of accepted loops | `avlo <file.c>` prints the full source with a V-iteration main loop (four by default; `#pragma avlo width(N)` or `--width N`) and a scalar remainder | Implemented as a display-only representation; `--emit-c` remains the compiled artifact |
 | Cover control flow, nested loops, reductions, function calls and affine accesses | Branch, nested-loop, reduction, call, stride and rejection examples | Partial; see supported subset and limitations below |
-| Validate emitted output | `uv run pytest`; `uv run python scripts/e2e_c_examples.py` | 39 tests passed; 29 C examples compiled and ran or compiled as translation units |
+| Validate emitted output | `uv run pytest`; `uv run python scripts/e2e_c_examples.py` | 42 tests passed; 29 C examples compiled and ran or compiled as translation units |
 | Reproduce the project on another system | `uv sync`, README commands, C example end-to-end script | Documented; script requires GCC or compatible `CC` with OpenMP SIMD support |
 
 ## Implementation completed since Review 2
@@ -85,6 +85,7 @@ From the repository root:
 ```bash
 uv sync
 uv run avlo examples/vector_add.c
+uv run avlo examples/vector_add.c --width 8
 uv run avlo examples/branch.c --emit-c /tmp/branch.simd.c
 gcc -O3 -fopenmp-simd /tmp/branch.simd.c -o /tmp/branch
 /tmp/branch
@@ -97,7 +98,8 @@ Suggested live sequence:
 1. Show the repository revision, dependencies, and commands above.
 2. Analyze and emit a representative valid C loop; explain the reported decision,
    the printed strip-mined representation, and where the directive appears
-   in generated C.
+   in generated C. Change `#pragma avlo width(4)` in `examples/vector_add.c` to
+   `8` (or pass `--width 8`) to show the printed lane count change live.
 3. Demonstrate a nested or boundary case and a reduction or supported branch.
 4. Analyze an unsafe dependence or unsupported pointer/control-flow case and
    show why it remains unannotated.
@@ -106,7 +108,7 @@ Suggested live sequence:
 6. Invite an evaluator-selected input, then discuss its expected behavior and
    actual result.
 
-The checked results recorded for this workspace are **39 passing pytest tests**
+The checked results recorded for this workspace are **42 passing pytest tests**
 and **29 validated C examples**. Across those examples the analysis accepts 47
 loops, rejects 4 and marks 1 unsupported. The end-to-end script compiles original
 and emitted programs with GCC using `-std=c11 -O2 -fopenmp-simd` and compares

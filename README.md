@@ -32,10 +32,13 @@ uv run pytest
 ```
 
 For C input the report prints each loop's decision and then the full source with
-accepted loops strip-mined: a main loop holding four copies of the body and a
-scalar remainder loop. Rejected loops are printed unchanged. The printed view is
-a representation, not compiled C. `--emit-c` writes the original source with
-`#pragma omp simd` on the accepted loops; the compiler generates the SIMD code.
+accepted loops strip-mined: a main loop holding V copies of the body and a
+scalar remainder loop. Rejected loops are printed unchanged. V defaults to four;
+a source file can set it with `#pragma avlo width(N)`, and `--width N` overrides
+it. This changes the printed representation only; the emitted C remains
+width-agnostic. The printed view is a representation, not compiled C. `--emit-c`
+writes the original source with `#pragma omp simd` on the accepted loops; the
+compiler generates the SIMD code.
 
 The current C subset accepts counted `for` loops with constant non-zero induction
 steps and runtime or constant bounds. Perfect counted-loop nests are analyzed at

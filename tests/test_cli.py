@@ -88,3 +88,36 @@ def test_early_exit_is_not_annotated(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "UNSUPPORTED" in output
     assert "#pragma omp simd" not in emitted.read_text(encoding="utf-8")
+
+
+def test_c_source_width_pragma_changes_display(tmp_path, capsys):
+    source = tmp_path / "width.c"
+    source.write_text(
+        "#pragma avlo width(8)\n"
+        "void f(int n, int * restrict c, const int * restrict a,\n"
+        "       const int * restrict b) {\n"
+        "  for (int i = 0; i < n; i++)\n"
+        "    c[i] = a[i] + b[i];\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert main([str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "i + 7 < n" in output
+    assert "i += 8" in output
+
+
+def test_cli_width_overrides_display(capsys):
+    assert main([str(EXAMPLES / "vector_add.c"), "--width", "2"]) == 0
+    output = capsys.readouterr().out
+    assert "i + 1 < n" in output
+    assert "i += 2" in output
+
+
+def test_cli_width_overrides_toy_ir(tmp_path, capsys):
+    loop = _write(
+        tmp_path,
+        "vector_width 4\nloop i = 0 to 10\n    c[i] = a[i] + b[i]\nend\n",
+    )
+    assert main([str(loop), "--width", "8", "--metrics"]) == 0
+    assert "chunks: 1 x 8" in capsys.readouterr().out
